@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cenkalti/backoff"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -37,22 +38,31 @@ type HueTempSensorState struct {
 }
 
 func discoverHueBridges(hue_api_key string, influx_db_address string, hueDiscoveryUrl string) HueBridges {
-	response, err := http.Get(hueDiscoveryUrl)
-	if err != nil {
-		panic(err)
-	}
-	defer response.Body.Close()
-
-	responseData, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	var hueBridges HueBridges
-	err = json.Unmarshal([]byte(responseData), &hueBridges)
+
+	err := backoff.Retry(func() error {
+		response, err := http.Get(hueDiscoveryUrl)
+		if err != nil {
+			return err
+		}
+		fmt.Println(response)
+		defer response.Body.Close()
+		responseData, err := ioutil.ReadAll(response.Body)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		err = json.Unmarshal([]byte(responseData), &hueBridges)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return nil
+	}, backoff.NewExponentialBackOff())
+
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Println(hueBridges)
 	return hueBridges
 }
 
@@ -63,7 +73,7 @@ func discoverHueSensors(hueBridges HueBridges, hue_api_key string) []HueSensor {
 		hueSensorUrl := "http://" + bridgeAddress + "/api/" + hue_api_key + "/sensors/"
 		response, err := http.Get(hueSensorUrl)
 		if err != nil {
-			panic(err)
+			log.Fatal(err)
 		}
 		defer response.Body.Close()
 
@@ -118,7 +128,6 @@ func main() {
 	}
 	tick := time.Tick(5 * time.Minute)
 	for range tick {
-		hueBridges := discoverHueBridges(hueApiKey, influxDbAddress, hueDiscoveryUrl)
 		hueTemperatureSensors := discoverHueSensors(hueBridges, hueApiKey)
 		for _, hueSensor := range hueTemperatureSensors {
 			postToInflux(hueSensor, influxDbAddress)
