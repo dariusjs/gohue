@@ -73,27 +73,27 @@ func discoverHueSensors(hueBridges HueBridges, hue_api_key string) []HueSensor {
 		hueSensorUrl := "http://" + bridgeAddress + "/api/" + hue_api_key + "/sensors/"
 		response, err := http.Get(hueSensorUrl)
 		if err != nil {
-			log.Fatal(err)
+			log.Print(err)
 		}
 		defer response.Body.Close()
 
 		responseData, err := ioutil.ReadAll(response.Body)
 		if err != nil {
-			log.Fatal(err)
+			log.Print(err)
 		}
 
 		var hueSensors map[string]interface{}
 		json.Unmarshal([]byte(responseData), &hueSensors)
 		err = json.Unmarshal([]byte(responseData), &hueSensors)
 		if err != nil {
-			log.Fatal(err)
+			log.Print(err)
 		}
 
 		for _, Value := range hueSensors {
 			var hueSensor HueSensor
 			err := mapstructure.Decode(Value, &hueSensor)
 			if err != nil {
-				log.Fatal(err)
+				log.Print(err)
 			}
 			if hueSensor.Type == "ZLLTemperature" {
 				hueSensor.Name = strings.ReplaceAll(hueSensor.Name, " ", "_")
@@ -105,13 +105,25 @@ func discoverHueSensors(hueBridges HueBridges, hue_api_key string) []HueSensor {
 	return temperatureSensors
 }
 
-func postToInflux(hueSensor HueSensor, influxDbAddress string) {
-	payload := "hue," + "name=" + fmt.Sprint(hueSensor.Name) + " temperature=" + fmt.Sprint(hueSensor.State.Temperature) + ",battery=" + fmt.Sprint(hueSensor.Config.Battery)
-	response, err := http.Post(influxDbAddress, "application/octet-stream", bytes.NewBuffer([]byte(payload)))
+func postToInflux(payload string, influxDbAddress string) {
+	err := backoff.Retry(func() error {
+		response, err := http.Post(influxDbAddress, "application/octet-stream", bytes.NewBuffer([]byte(payload)))
+		if err != nil {
+			return err
+		}
+		fmt.Println(response)
+		defer response.Body.Close()
+		return nil
+	}, backoff.NewExponentialBackOff())
+
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(response)
+}
+
+func formatInfluxPayload(hueSensor HueSensor) string {
+	payload := "hue," + "name=" + fmt.Sprint(hueSensor.Name) + " temperature=" + fmt.Sprint(hueSensor.State.Temperature) + ",battery=" + fmt.Sprint(hueSensor.Config.Battery)
+	return payload
 }
 
 func main() {
@@ -124,13 +136,15 @@ func main() {
 	hueBridges := discoverHueBridges(hueApiKey, influxDbAddress, hueDiscoveryUrl)
 	hueTemperatureSensors := discoverHueSensors(hueBridges, hueApiKey)
 	for _, hueSensor := range hueTemperatureSensors {
-		postToInflux(hueSensor, influxDbAddress)
+		payload := formatInfluxPayload(hueSensor)
+		postToInflux(payload, influxDbAddress)
 	}
 	tick := time.Tick(5 * time.Minute)
 	for range tick {
 		hueTemperatureSensors := discoverHueSensors(hueBridges, hueApiKey)
 		for _, hueSensor := range hueTemperatureSensors {
-			postToInflux(hueSensor, influxDbAddress)
+			payload := formatInfluxPayload(hueSensor)
+			postToInflux(payload, influxDbAddress)
 		}
 	}
 	err := http.ListenAndServe(":4000", webserver)
