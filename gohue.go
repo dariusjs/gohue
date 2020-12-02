@@ -12,17 +12,30 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff"
-	"github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
 )
 
+// HueBridges holds the hue bridge objects
 type HueBridges []HueBridge
 
+// HueBridge structure for discovered hue bridges
 type HueBridge struct {
-	Id                string `json:"id"`
+	ID                string `json:"id"`
 	Internalipaddress string `json:"internalipaddress"`
 }
 
+// HueResources storing hue resources
+type HueResources struct {
+	Config        map[string]interface{} `json:"config"`
+	Scenes        map[string]interface{} `json:"scenes"`
+	Schedules     map[string]interface{} `json:"schedules"`
+	Sensors       map[string]HueSensor   `json:"sensors"`
+	Resourcelinks map[string]interface{} `json:"resourcelinks"`
+	Lights        map[string]interface{} `json:"lights"`
+	Rules         map[string]interface{} `json:"rules"`
+}
+
+// HueSensor storing hue sensor objects
 type HueSensor struct {
 	Name   string          `json:"name"`
 	Type   string          `json:"type"`
@@ -30,11 +43,13 @@ type HueSensor struct {
 	State  HueSensorState  `json:"state"`
 }
 
+// HueSensorState storing hue sensor state
 type HueSensorState struct {
 	Temperature float64 `json:"temperature"`
 	Lightlevel  float64 `json:"lightlevel"`
 }
 
+// HueSensorConfig storing hue sensor config
 type HueSensorConfig struct {
 	Battery float64 `json:"battery"`
 }
@@ -48,14 +63,14 @@ func init() {
 	log.SetOutput(os.Stdout)
 
 	// Only log the warning severity or above.
-	log.SetLevel(log.InfoLevel)
+	log.SetLevel(log.DebugLevel)
 }
 
-func discoverHueBridges(hue_api_key string, influx_db_address string, hueDiscoveryUrl string) HueBridges {
+func discoverHueBridges(hueAPIKey string, influxDbAddress string, hueDiscoveryURL string) HueBridges {
 	var hueBridges HueBridges
 
 	err := backoff.Retry(func() error {
-		response, err := http.Get(hueDiscoveryUrl)
+		response, err := http.Get(hueDiscoveryURL)
 		if err != nil {
 			return err
 		}
@@ -82,11 +97,11 @@ func discoverHueBridges(hue_api_key string, influx_db_address string, hueDiscove
 	return hueBridges
 }
 
-func discoverHueSensors(hueBridges HueBridges, hue_api_key string, influxDbAddress string) {
+func discoverHueSensors(hueBridges HueBridges, hueAPIKey string, influxDbAddress string) {
 	for _, value := range hueBridges {
 		bridgeAddress := value.Internalipaddress
-		hueSensorUrl := "http://" + bridgeAddress + "/api/" + hue_api_key + "/sensors/"
-		response, err := http.Get(hueSensorUrl)
+		hueSensorURL := "http://" + bridgeAddress + "/api/" + hueAPIKey
+		response, err := http.Get(hueSensorURL)
 		if err != nil {
 			log.Print(err)
 		}
@@ -97,16 +112,15 @@ func discoverHueSensors(hueBridges HueBridges, hue_api_key string, influxDbAddre
 			log.Print(err)
 		}
 
-		var hueSensors map[string]interface{}
-		json.Unmarshal([]byte(responseData), &hueSensors)
-		err = json.Unmarshal([]byte(responseData), &hueSensors)
+		var hueResources HueResources
+		err = json.Unmarshal([]byte(responseData), &hueResources)
 		if err != nil {
 			log.Print(err)
 		}
+		hueSensors := hueResources.Sensors
 
 		for _, Value := range hueSensors {
-			var hueSensor HueSensor
-			err := mapstructure.Decode(Value, &hueSensor)
+			hueSensor := Value
 			if err != nil {
 				log.Print(err)
 			}
@@ -137,7 +151,7 @@ func postToInflux(payload string, influxDbAddress string) {
 		if err != nil {
 			return err
 		}
-		fmt.Println(response)
+		log.Print(response)
 		defer response.Body.Close()
 		return nil
 	}, backoff.NewExponentialBackOff())
@@ -148,20 +162,20 @@ func postToInflux(payload string, influxDbAddress string) {
 }
 
 func main() {
-	hueApiKey := os.Getenv("HUE_API_KEY")
+	hueAPIKey := os.Getenv("HUE_API_KEY")
 	influxDbAddress := os.Getenv("INFLUX_DB_ADDRESS")
-	hueDiscoveryUrl := "https://discovery.meethue.com/"
+	hueDiscoveryURL := "https://discovery.meethue.com/"
 
 	webserver := http.NewServeMux()
 
 	// Initial Discover
-	hueBridges := discoverHueBridges(hueApiKey, influxDbAddress, hueDiscoveryUrl)
-	discoverHueSensors(hueBridges, hueApiKey, influxDbAddress)
+	hueBridges := discoverHueBridges(hueAPIKey, influxDbAddress, hueDiscoveryURL)
+	discoverHueSensors(hueBridges, hueAPIKey, influxDbAddress)
 
 	// Scheduled scan
 	tick := time.Tick(5 * time.Minute)
 	for range tick {
-		discoverHueSensors(hueBridges, hueApiKey, influxDbAddress)
+		discoverHueSensors(hueBridges, hueAPIKey, influxDbAddress)
 	}
 	err := http.ListenAndServe(":4000", webserver)
 	log.Fatal(err)
